@@ -1,0 +1,219 @@
+name: Build PhysX Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Git tag to create or update for the GitHub Release
+        required: true
+        type: string
+      release_name:
+        description: GitHub Release title (defaults to the tag)
+        required: false
+        type: string
+      prerelease:
+        description: Mark the GitHub Release as a prerelease
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build-linux:
+    name: Linux SDK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            curl \
+            freeglut3-dev \
+            libglu1-mesa-dev \
+            libdrm2 \
+            libglapi-mesa \
+            libx11-xcb1 \
+            libxcb-dri2-0 \
+            libxcb-glx0 \
+            libxdamage-dev \
+            libxmu-dev \
+            make \
+            python3 \
+            zip
+
+      - name: Install CUDA Toolkit 12.8
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-toolkit-12-8
+          rm -f cuda-keyring_1.1-1_all.deb
+
+          echo "PM_CUDA_PATH=/usr/local/cuda-12.8" >> "$GITHUB_ENV"
+          echo "CUDACXX=/usr/local/cuda-12.8/bin/nvcc" >> "$GITHUB_ENV"
+          echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
+
+      - name: Verify CUDA
+        shell: bash
+        run: |
+          set -euxo pipefail
+          nvcc --version
+
+      - name: Generate Linux projects
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ./PhysX/physx/generate_projects.sh linux-clang
+
+      - name: Build and install Linux checked
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake --build PhysX/physx/compiler/linux-clang-checked --parallel "$(nproc)" --target install
+
+      - name: Build and install Linux release
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake --build PhysX/physx/compiler/linux-clang-release --parallel "$(nproc)" --target install
+
+      - name: Show Linux install tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find PhysX/physx/install/linux-clang/PhysX -maxdepth 4 -type d | sort
+
+      - name: Package Linux release assets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          source_root="PhysX/physx/install/linux-clang/PhysX"
+          dist_root="dist/linux"
+          staging_root="$dist_root/staging"
+          cpu_root="$staging_root/physxcpu-linux-clang/PhysX"
+          gpu_root="$staging_root/physxgpu-linux-clang/PhysX"
+
+          rm -rf "$dist_root"
+          mkdir -p "$cpu_root" "$gpu_root/include"
+
+          cp -a "$source_root/." "$cpu_root/"
+          if [ -d "$cpu_root/bin" ]; then
+            find "$cpu_root/bin" -mindepth 2 -maxdepth 2 -type d ! -name release -exec rm -rf {} +
+          fi
+          find "$cpu_root" -type f \( -name 'libPhysXGpu_*.so' -o -name 'libPhysXGpu_*.a' \) -delete
+          rm -rf "$cpu_root/include/gpu" "$cpu_root/include/cudamanager"
+
+          if [ -d "$source_root/include/gpu" ]; then
+            mkdir -p "$gpu_root/include/gpu"
+            cp -a "$source_root/include/gpu/." "$gpu_root/include/gpu/"
+          fi
+          if [ -d "$source_root/include/cudamanager" ]; then
+            mkdir -p "$gpu_root/include/cudamanager"
+            cp -a "$source_root/include/cudamanager/." "$gpu_root/include/cudamanager/"
+          fi
+
+          mapfile -t gpu_files < <(
+            cd "$source_root"
+            find bin -path '*/release/*' -type f \( -name 'libPhysXGpu_*.so' -o -name 'libPhysXGpu_*.a' \) | sort
+          )
+
+          if [ "${#gpu_files[@]}" -eq 0 ]; then
+            echo "No Linux PhysXGpu package files were found." >&2
+            exit 1
+          fi
+
+          for relative_path in "${gpu_files[@]}"; do
+            mkdir -p "$gpu_root/$(dirname "$relative_path")"
+            cp -a "$source_root/$relative_path" "$gpu_root/$relative_path"
+          done
+
+      - name: Upload Linux SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: physx-linux-clang-sdk
+          path: PhysX/physx/install/linux-clang/PhysX
+          if-no-files-found: error
+
+      - name: Upload Linux release packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: physx-linux-release-packages
+          path: dist/linux/staging/*
+          if-no-files-found: error
+
+  release-linux:
+    name: Publish Linux GitHub Release
+    needs: build-linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 30
+
+    steps:
+      - name: Download Linux release packages
+        uses: actions/download-artifact@v4
+        with:
+          name: physx-linux-release-packages
+          path: release-assets
+
+      - name: Verify Linux release packages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ls -al release-assets
+          test -d release-assets/physxcpu-linux-clang
+          test -d release-assets/physxgpu-linux-clang
+          test -d release-assets/physxcpu-linux-clang/PhysX/bin/linux.x86_64/release
+          test ! -d release-assets/physxcpu-linux-clang/PhysX/bin/linux.x86_64/checked
+          test -f release-assets/physxgpu-linux-clang/PhysX/bin/linux.x86_64/release/libPhysXGpu_64.so
+          test ! -d release-assets/physxgpu-linux-clang/PhysX/bin/linux.x86_64/checked
+
+      - name: Zip Linux release packages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd release-assets
+          rm -f physxcpu-linux-clang.zip physxgpu-linux-clang.zip
+          zip -r physxcpu-linux-clang.zip physxcpu-linux-clang
+          zip -r physxgpu-linux-clang.zip physxgpu-linux-clang
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          RELEASE_NAME: ${{ github.event.inputs.release_name }}
+          RELEASE_PRERELEASE: ${{ github.event.inputs.prerelease }}
+        run: |
+          set -euxo pipefail
+          gh --version
+
+          release_title="${RELEASE_NAME:-$RELEASE_TAG}"
+
+          if ! gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            create_args=(
+              "$RELEASE_TAG"
+              "--repo" "$GH_REPO"
+              "--title" "$release_title"
+              "--notes" "Automated Linux PhysX CPU and GPU binaries from workflow run ${GITHUB_RUN_NUMBER}."
+            )
+            if [ "$RELEASE_PRERELEASE" = "true" ]; then
+              create_args+=("--prerelease")
+            fi
+            gh release create "${create_args[@]}" || gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null
+          fi
+
+          gh release upload "$RELEASE_TAG" release-assets/*.zip --clobber --repo "$GH_REPO"

@@ -1,0 +1,207 @@
+name: Build PhysX Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Git tag to create or update for the GitHub Release
+        required: true
+        type: string
+      release_name:
+        description: GitHub Release title (defaults to the tag)
+        required: false
+        type: string
+      prerelease:
+        description: Mark the GitHub Release as a prerelease
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build-windows:
+    name: Windows SDK
+    runs-on: windows-2022
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install CUDA Toolkit 12.8
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Join-Path $env:RUNNER_TEMP "cuda_12.8.0_windows_network.exe"
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/12.8.0/network_installers/cuda_12.8.0_windows_network.exe" -OutFile $installer
+
+          $process = Start-Process -FilePath $installer -ArgumentList @(
+            "-s",
+            "nvcc_12.8",
+            "cudart_12.8",
+            "visual_studio_integration_12.8",
+            "-n"
+          ) -Wait -PassThru
+
+          if ($process.ExitCode -ne 0) {
+            throw "CUDA installer failed with exit code $($process.ExitCode)."
+          }
+
+          $cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8"
+          if (-not (Test-Path $cudaRoot)) {
+            throw "CUDA toolkit was not installed at $cudaRoot."
+          }
+
+          "CUDA_PATH=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CUDA_PATH_V12_8=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PM_CUDA_PATH=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$cudaRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Verify CUDA
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          nvcc --version
+
+      - name: Generate Windows projects
+        shell: cmd
+        run: PhysX\physx\generate_projects.bat vc17win64
+
+      - name: Build and install Windows checked
+        shell: cmd
+        run: cmake --build PhysX/physx/compiler/vc17win64 --config checked --target INSTALL -- /m
+
+      - name: Build and install Windows release
+        shell: cmd
+        run: cmake --build PhysX/physx/compiler/vc17win64 --config release --target INSTALL -- /m
+
+      - name: Show Windows install tree
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-ChildItem -Path "PhysX/physx/install/vc17win64/PhysX" -Directory -Recurse | Select-Object -ExpandProperty FullName
+
+      - name: Package Windows release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sourceRoot = Join-Path $PWD "PhysX/physx/install/vc17win64/PhysX"
+          $distRoot = Join-Path $PWD "dist/windows"
+          $stagingRoot = Join-Path $distRoot "staging"
+          $cpuRoot = Join-Path $stagingRoot "physxcpu-windows-vc17win64/PhysX"
+          $gpuRoot = Join-Path $stagingRoot "physxgpu-windows-vc17win64/PhysX"
+
+          Remove-Item -Path $distRoot -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $cpuRoot -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $gpuRoot "include") -Force | Out-Null
+
+          Copy-Item -Path (Join-Path $sourceRoot "*") -Destination $cpuRoot -Recurse -Force
+
+          Get-ChildItem -Path $cpuRoot -Recurse -File |
+            Where-Object {
+              $_.Name -like "PhysXGpu_*.dll" -or
+              $_.Name -like "PhysXGpu_*.lib" -or
+              $_.Name -like "PhysXGpu_*.pdb"
+            } |
+            Remove-Item -Force
+
+          Remove-Item -Path (Join-Path $cpuRoot "include/gpu") -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path (Join-Path $cpuRoot "include/cudamanager") -Recurse -Force -ErrorAction SilentlyContinue
+
+          if (Test-Path (Join-Path $sourceRoot "include/gpu")) {
+            Copy-Item -Path (Join-Path $sourceRoot "include/gpu") -Destination (Join-Path $gpuRoot "include/gpu") -Recurse -Force
+          }
+
+          if (Test-Path (Join-Path $sourceRoot "include/cudamanager")) {
+            Copy-Item -Path (Join-Path $sourceRoot "include/cudamanager") -Destination (Join-Path $gpuRoot "include/cudamanager") -Recurse -Force
+          }
+
+          $gpuFiles = Get-ChildItem -Path (Join-Path $sourceRoot "bin") -Recurse -File |
+            Where-Object {
+              $_.Name -like "PhysXGpu_*.dll" -or
+              $_.Name -like "PhysXGpu_*.lib" -or
+              $_.Name -like "PhysXGpu_*.pdb"
+            } |
+            Sort-Object FullName
+
+          if (-not $gpuFiles) {
+            throw "No Windows PhysXGpu package files were found."
+          }
+
+          $resolvedSourceRoot = (Resolve-Path $sourceRoot).Path
+          foreach ($file in $gpuFiles) {
+            $relativePath = $file.FullName.Substring($resolvedSourceRoot.Length + 1)
+            $destination = Join-Path $gpuRoot $relativePath
+            New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
+            Copy-Item -Path $file.FullName -Destination $destination -Force
+          }
+
+          Compress-Archive -Path (Join-Path $stagingRoot "physxcpu-windows-vc17win64") -DestinationPath (Join-Path $distRoot "physxcpu-windows-vc17win64.zip") -Force
+          Compress-Archive -Path (Join-Path $stagingRoot "physxgpu-windows-vc17win64") -DestinationPath (Join-Path $distRoot "physxgpu-windows-vc17win64.zip") -Force
+
+      - name: Upload Windows SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: physx-windows-vc17win64-sdk
+          path: PhysX/physx/install/vc17win64/PhysX
+          if-no-files-found: error
+
+      - name: Upload Windows release packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: physx-windows-release-packages
+          path: dist/windows/*.zip
+          if-no-files-found: error
+
+  release-windows:
+    name: Publish Windows GitHub Release
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 30
+
+    steps:
+      - name: Download Windows release packages
+        uses: actions/download-artifact@v4
+        with:
+          name: physx-windows-release-packages
+          path: release-assets
+
+      - name: Verify Windows release packages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ls -al release-assets
+          test -f release-assets/physxcpu-windows-vc17win64.zip
+          test -f release-assets/physxgpu-windows-vc17win64.zip
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          RELEASE_NAME: ${{ github.event.inputs.release_name }}
+          RELEASE_PRERELEASE: ${{ github.event.inputs.prerelease }}
+        run: |
+          set -euxo pipefail
+          gh --version
+
+          release_title="${RELEASE_NAME:-$RELEASE_TAG}"
+
+          if ! gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            create_args=(
+              "$RELEASE_TAG"
+              "--repo" "$GH_REPO"
+              "--title" "$release_title"
+              "--notes" "Automated Windows PhysX CPU and GPU binaries from workflow run ${GITHUB_RUN_NUMBER}."
+            )
+            if [ "$RELEASE_PRERELEASE" = "true" ]; then
+              create_args+=("--prerelease")
+            fi
+            gh release create "${create_args[@]}" || gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null
+          fi
+
+          gh release upload "$RELEASE_TAG" release-assets/*.zip --clobber --repo "$GH_REPO"
