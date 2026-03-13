@@ -53,10 +53,18 @@ jobs:
             throw "CUDA toolkit was not installed at $cudaRoot."
           }
 
-          "CUDA_PATH=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CUDA_PATH_V12_8=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "PM_CUDA_PATH=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "$cudaRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          # PhysX's Windows generator passes PM_CUDA_PATH to CMake without quoting.
+          # Use a junction without spaces so both -DCUDAToolkit_ROOT_DIR and -T cuda=... stay intact.
+          $cudaAliasRoot = Join-Path $env:RUNNER_TEMP "cuda-12.8"
+          if (Test-Path $cudaAliasRoot) {
+            Remove-Item -Path $cudaAliasRoot -Force
+          }
+          New-Item -ItemType Junction -Path $cudaAliasRoot -Target $cudaRoot | Out-Null
+
+          "CUDA_PATH=$cudaAliasRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CUDA_PATH_V12_8=$cudaAliasRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PM_CUDA_PATH=$cudaAliasRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$cudaAliasRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - name: Verify CUDA
         shell: pwsh
@@ -66,7 +74,12 @@ jobs:
 
       - name: Generate Windows projects
         shell: cmd
-        run: PhysX\physx\generate_projects.bat vc17win64
+        run: |
+          PhysX\physx\generate_projects.bat vc17win64
+          if not exist PhysX\physx\compiler\vc17win64\INSTALL.vcxproj (
+            echo Expected generated project PhysX\physx\compiler\vc17win64\INSTALL.vcxproj was not created.
+            exit /b 1
+          )
 
       - name: Build and install Windows checked
         shell: cmd
