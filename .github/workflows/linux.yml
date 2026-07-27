@@ -20,10 +20,33 @@ on:
 jobs:
   build-linux:
     name: Linux SDK
+    # PhysX requires glibc 2.31 or higher and lists Ubuntu 20.04 LTS / Clang 10 as its oldest
+    # supported combination (physx/documentation/platformreadme/linux/README_LINUX.md). Build
+    # on exactly that floor so the binaries stay loadable on every supported distro: linking
+    # on a newer glibc silently raises the requirement, which is how the earlier 24.04 build
+    # ended up emitting __isoc23_* symbols that only exist from glibc 2.38 on.
+    #
+    # The ubuntu-20.04 hosted runner was retired on 2025-04-15, so pin the floor with a
+    # container on a supported runner instead.
     runs-on: ubuntu-22.04
+    container:
+      image: ubuntu:20.04
     timeout-minutes: 180
 
     steps:
+      # actions/checkout shells out to git for submodules, so it has to exist beforehand.
+      - name: Bootstrap container
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            git \
+            gnupg
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -33,15 +56,14 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y \
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get install -y --no-install-recommends \
             clang \
             cmake \
-            curl \
             freeglut3-dev \
-            libglu1-mesa-dev \
             libdrm2 \
             libglapi-mesa \
+            libglu1-mesa-dev \
             libx11-xcb1 \
             libxcb-dri2-0 \
             libxcb-glx0 \
@@ -55,21 +77,27 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update
-          sudo apt-get install -y cuda-toolkit-12-8
+          export DEBIAN_FRONTEND=noninteractive
+          # The repo must match the container's Ubuntu release. Pulling the 24.04 repo onto an
+          # older base lets apt satisfy CUDA's dependencies with 24.04 packages and drag a
+          # newer libc6 in with them, which defeats the whole point of pinning the floor.
+          curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb
+          dpkg -i cuda-keyring_1.1-1_all.deb
+          apt-get update
+          apt-get install -y --no-install-recommends cuda-toolkit-12-8
           rm -f cuda-keyring_1.1-1_all.deb
 
           echo "PM_CUDA_PATH=/usr/local/cuda-12.8" >> "$GITHUB_ENV"
           echo "CUDACXX=/usr/local/cuda-12.8/bin/nvcc" >> "$GITHUB_ENV"
           echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
 
-      - name: Verify CUDA
+      - name: Verify toolchain
         shell: bash
         run: |
           set -euxo pipefail
           nvcc --version
+          clang --version
+          ldd --version | head -1
 
       - name: Generate Linux projects
         shell: bash
