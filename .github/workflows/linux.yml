@@ -26,9 +26,10 @@ jobs:
     # on a newer glibc silently raises the requirement, which is how the earlier 24.04 build
     # ended up emitting __isoc23_* symbols that only exist from glibc 2.38 on.
     #
-    # The ubuntu-20.04 hosted runner was retired on 2025-04-15, so pin the floor with a
-    # container on a supported runner instead.
-    runs-on: ubuntu-22.04
+    # The ubuntu-20.04 hosted runner was retired on 2025-04-15, so the floor is held by a
+    # container instead. The host image then only carries the runner, never the toolchain, so
+    # track the latest rather than pinning a version that will itself be deprecated.
+    runs-on: ubuntu-latest
     container:
       image: ubuntu:20.04
     timeout-minutes: 180
