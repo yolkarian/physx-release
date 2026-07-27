@@ -60,7 +60,6 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt-get install -y --no-install-recommends \
             clang \
-            cmake \
             freeglut3-dev \
             libdrm2 \
             libglapi-mesa \
@@ -73,6 +72,24 @@ jobs:
             make \
             python3 \
             zip
+
+      - name: Install CMake
+        shell: bash
+        env:
+          CMAKE_VERSION: 3.31.6
+        run: |
+          set -euxo pipefail
+          # Not the distro's cmake: 20.04 ships 3.16.3, and FindCUDAToolkit.cmake only arrived
+          # in 3.17. PhysX's CMakeLists calls find_package(CUDAToolkit), so on 3.16 the
+          # configure step fails while generate_projects.sh still exits 0, leaving build
+          # directories with no install target. CMake is a build tool, so its own baseline
+          # does not affect the glibc floor of the binaries it produces.
+          curl -fsSL -o /tmp/cmake.tar.gz \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz"
+          mkdir -p /opt/cmake
+          tar -xzf /tmp/cmake.tar.gz -C /opt/cmake --strip-components=1
+          rm -f /tmp/cmake.tar.gz
+          echo "/opt/cmake/bin" >> "$GITHUB_PATH"
 
       - name: Install CUDA Toolkit 12.8
         shell: bash
@@ -97,6 +114,7 @@ jobs:
         run: |
           set -euxo pipefail
           nvcc --version
+          cmake --version
           clang --version
           # No pipe: under `set -o pipefail`, head exiting early SIGPIPEs ldd and fails the step.
           ldd --version
@@ -106,6 +124,17 @@ jobs:
         run: |
           set -euxo pipefail
           ./PhysX/physx/generate_projects.sh linux-clang
+
+          # generate_projects.sh exits 0 even when CMake configure fails, which leaves build
+          # directories without an install target and defers the error to a confusing
+          # "No rule to make target 'install'" much later. Check the configure actually landed.
+          for preset in checked release; do
+            dir="PhysX/physx/compiler/linux-clang-${preset}"
+            if [ ! -f "${dir}/cmake_install.cmake" ]; then
+              echo "CMake configure did not complete for ${preset}: ${dir}/cmake_install.cmake is missing" >&2
+              exit 1
+            fi
+          done
 
       - name: Build and install Linux checked
         shell: bash
