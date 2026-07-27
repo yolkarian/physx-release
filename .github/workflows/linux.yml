@@ -97,7 +97,8 @@ jobs:
           set -euxo pipefail
           nvcc --version
           clang --version
-          ldd --version | head -1
+          # No pipe: under `set -o pipefail`, head exiting early SIGPIPEs ldd and fails the step.
+          ldd --version
 
       - name: Generate Linux projects
         shell: bash
